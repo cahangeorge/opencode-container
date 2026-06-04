@@ -1,0 +1,12 @@
+node_modules
+.git
+*.log
+*.db
+*.db-*
+*.bak*
+tool-output
+snapshot
+repos
+storage
+.local
+.cache
