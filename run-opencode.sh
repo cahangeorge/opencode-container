@@ -1,12 +1,15 @@
 #!/usr/bin/env bash
-# Run OpenCode in a container with all host settings
+# Run OpenCode (CLI) or OpenCode + OpenChamber (Web UI) in a container
 # Supports Podman (preferred) and Docker
-# Usage: ./run-opencode.sh [project-dir] [extra-args...]
+#
+# Usage:
+#   ./run-opencode.sh [project-dir] [extra-args...]     # OpenCode CLI
+#   ./run-opencode.sh --chamber [project-dir]             # OpenCode + OpenChamber Web UI
 #
 # Examples:
-#   ./run-opencode.sh                          # Run in current dir
-#   ./run-opencode.sh ~/Projects/myapp         # Run in specific project
-#   ./run-opencode.sh ~/Projects/myapp --help  # Pass args to opencode
+#   ./run-opencode.sh                          # CLI in current dir
+#   ./run-opencode.sh ~/Projects/myapp         # CLI in specific project
+#   ./run-opencode.sh --chamber ~/Projects/myapp  # Web UI for project
 
 set -euo pipefail
 
@@ -23,11 +26,20 @@ else
     exit 1
 fi
 
+# ─── Parse mode flag ───────────────────────────────────────────
+CHAMBER_MODE=false
+if [[ "${1:-}" == "--chamber" ]]; then
+    CHAMBER_MODE=true
+    shift
+fi
+
 # ─── Configuration ───────────────────────────────────────────────
 CONTAINER_NAME="opencode"
 IMAGE_NAME="localhost/opencode"
 HOST_CONFIG_DIR="${HOME}/.config/opencode"
 HOST_DATA_DIR="${HOME}/.local/share/opencode"
+HOST_STATE_DIR="${HOME}/.local/state/opencode"
+HOST_CHAMBER_CONFIG_DIR="${HOME}/.config/openchamber"
 CONTAINER_HOME="/home/opencode"
 
 # ─── Project directory (first arg, unless it's a flag) ─────────
@@ -52,6 +64,8 @@ fi
 # ─── Ensure directories exist ────────────────────────────────────
 mkdir -p "${HOST_CONFIG_DIR}"
 mkdir -p "${HOST_DATA_DIR}"
+mkdir -p "${HOST_STATE_DIR}"
+mkdir -p "${HOST_CHAMBER_CONFIG_DIR}"
 
 # ─── Safe env file loading (no arbitrary code execution) ─────────
 ENV_FILE="${HOST_CONFIG_DIR}/.env"
@@ -63,7 +77,7 @@ if [[ -f "${ENV_FILE}" ]]; then
         [[ -z "${key}" ]] && continue
         # Only allow known API key variables
         case "${key}" in
-            OPENAI_API_KEY|ANTHROPIC_API_KEY|GOOGLE_API_KEY|CONTEXT7_API_KEY|BRAVE_API_KEY|PLAYWRITER_TOKEN|AGENTMEMORY_URL|PLAYWRITER_HOST)
+            OPENAI_API_KEY|ANTHROPIC_API_KEY|GOOGLE_API_KEY|CONTEXT7_API_KEY|BRAVE_API_KEY|PLAYWRITER_TOKEN|AGENTMEMORY_URL|PLAYWRITER_HOST|UI_PASSWORD|GITHUB_PERSONAL_ACCESS_TOKEN|AGENTMEMORY_SECRET|MANIFEST_AUTH_SECRET|OH_MY_OPENCODE|OH_MY_OPENCODE_DCP|PLAYWRITER_AUTO_ENABLE|OPENCHAMBER_TUNNEL_PROVIDER|OPENCHAMBER_TUNNEL_MODE|OPENCHAMBER_TUNNEL_HOSTNAME|OPENCHAMBER_TUNNEL_TOKEN|OPENCHAMBER_TUNNEL_CONFIG)
                 export "${key}=${value}"
                 ;;
         esac
@@ -119,13 +133,63 @@ elif [[ -d "${HOME}/.ssh" ]]; then
     MOUNTS+=(-v "${HOME}/.ssh:${CONTAINER_HOME}/.ssh:ro")
 fi
 
+# ─── Chamber mode: additional mounts and config ─────────────────
+ENTRYPOINT_OVERRIDE=""
+PORTS=""
+CHAMBER_ENVS=()
+
+if [[ "${CHAMBER_MODE}" == true ]]; then
+    echo "Mode: OpenCode + OpenChamber (Web UI)"
+    CONTAINER_NAME="openchamber"
+
+    # Mount OpenChamber config
+    MOUNTS+=(-v "${HOST_CHAMBER_CONFIG_DIR}:${CONTAINER_HOME}/.config/openchamber:rw")
+
+    # Override entrypoint to start both services
+    ENTRYPOINT_OVERRIDE="--entrypoint /usr/local/bin/start-chamber.sh"
+
+    # Expose ports for OpenChamber (3000) and OpenCode serve (4096)
+    PORTS="-p 3000:3000 -p 4096:4096"
+
+    # OpenChamber environment variables
+    [[ -n "${UI_PASSWORD:-}" ]] && CHAMBER_ENVS+=(-e "UI_PASSWORD=${UI_PASSWORD}")
+    [[ -n "${OH_MY_OPENCODE:-}" ]] && CHAMBER_ENVS+=(-e "OH_MY_OPENCODE=${OH_MY_OPENCODE}")
+    [[ -n "${OH_MY_OPENCODE_DCP:-}" ]] && CHAMBER_ENVS+=(-e "OH_MY_OPENCODE_DCP=${OH_MY_OPENCODE_DCP}")
+    [[ -n "${GITHUB_PERSONAL_ACCESS_TOKEN:-}" ]] && CHAMBER_ENVS+=(-e "GITHUB_PERSONAL_ACCESS_TOKEN=${GITHUB_PERSONAL_ACCESS_TOKEN}")
+    [[ -n "${AGENTMEMORY_SECRET:-}" ]] && CHAMBER_ENVS+=(-e "AGENTMEMORY_SECRET=${AGENTMEMORY_SECRET}")
+    [[ -n "${PLAYWRITER_AUTO_ENABLE:-}" ]] && CHAMBER_ENVS+=(-e "PLAYWRITER_AUTO_ENABLE=${PLAYWRITER_AUTO_ENABLE}")
+    [[ -n "${MANIFEST_AUTH_SECRET:-}" ]] && CHAMBER_ENVS+=(-e "MANIFEST_AUTH_SECRET=${MANIFEST_AUTH_SECRET}")
+    [[ -n "${OPENCHAMBER_TUNNEL_PROVIDER:-}" ]] && CHAMBER_ENVS+=(-e "OPENCHAMBER_TUNNEL_PROVIDER=${OPENCHAMBER_TUNNEL_PROVIDER}")
+    [[ -n "${OPENCHAMBER_TUNNEL_MODE:-}" ]] && CHAMBER_ENVS+=(-e "OPENCHAMBER_TUNNEL_MODE=${OPENCHAMBER_TUNNEL_MODE}")
+    [[ -n "${OPENCHAMBER_TUNNEL_HOSTNAME:-}" ]] && CHAMBER_ENVS+=(-e "OPENCHAMBER_TUNNEL_HOSTNAME=${OPENCHAMBER_TUNNEL_HOSTNAME}")
+    [[ -n "${OPENCHAMBER_TUNNEL_TOKEN:-}" ]] && CHAMBER_ENVS+=(-e "OPENCHAMBER_TUNNEL_TOKEN=${OPENCHAMBER_TUNNEL_TOKEN}")
+    [[ -n "${OPENCHAMBER_TUNNEL_CONFIG:-}" ]] && CHAMBER_ENVS+=(-e "OPENCHAMBER_TUNNEL_CONFIG=${OPENCHAMBER_TUNNEL_CONFIG}")
+
+    # Fixed OpenChamber settings
+    CHAMBER_ENVS+=(-e "NODE_ENV=production")
+    CHAMBER_ENVS+=(-e "OPENCHAMBER_HOST=0.0.0.0")
+    CHAMBER_ENVS+=(-e "OPENCODE_SKIP_START=true")
+    CHAMBER_ENVS+=(-e "OPENCODE_HOST=http://localhost:4096")
+else
+    echo "Mode: OpenCode CLI"
+fi
+
 # ─── Networking: host network on Linux, port forwarding on macOS ─
 NETWORK_ARGS=""
 if [[ "$(uname -s)" == "Darwin" ]]; then
     echo "Note: Using port forwarding for macOS compatibility" >&2
-    NETWORK_ARGS="-p 19988:19988 -p 3111:3111"
+    if [[ "${CHAMBER_MODE}" == true ]]; then
+        # Ports already defined above for chamber mode
+        NETWORK_ARGS="${PORTS}"
+    else
+        NETWORK_ARGS="-p 19988:19988 -p 3111:3111"
+    fi
 else
-    NETWORK_ARGS="--network host"
+    if [[ "${CHAMBER_MODE}" == true ]]; then
+        NETWORK_ARGS="${PORTS}"
+    else
+        NETWORK_ARGS="--network host"
+    fi
 fi
 
 # ─── Podman-specific: keep UID mapping for file permissions ──────
@@ -134,12 +198,17 @@ if [[ "${CONTAINER_ENGINE}" == "podman" ]]; then
     USERNS_ARGS="--userns keep-id"
 fi
 
-# ─── Podman run ──────────────────────────────────────────────────
-echo "Starting OpenCode in container..."
+# ─── Container run ──────────────────────────────────────────────
+echo "Starting container..."
 echo "  Engine:  ${CONTAINER_ENGINE}"
 echo "  Project: ${PROJECT_DIR}"
 echo "  Config:  ${HOST_CONFIG_DIR}"
 echo "  Data:    ${HOST_DATA_DIR}"
+if [[ "${CHAMBER_MODE}" == true ]]; then
+    echo "  Chamber: ${HOST_CHAMBER_CONFIG_DIR}"
+    echo "  URLs:    http://localhost:3000 (OpenChamber)"
+    echo "           http://localhost:4096 (OpenCode API)"
+fi
 
 exec "${CONTAINER_ENGINE}" run --rm -it \
     --name "${CONTAINER_NAME}" \
@@ -153,15 +222,19 @@ exec "${CONTAINER_ENGINE}" run --rm -it \
     \
     `# ── Data persistence ──` \
     -v "${HOST_DATA_DIR}:${CONTAINER_HOME}/.local/share/opencode:rw" \
+    -v "${HOST_STATE_DIR}:${CONTAINER_HOME}/.local/state/opencode:rw" \
     \
     `# ── Project workspace ──` \
     -v "${PROJECT_DIR}:/workspace:rw" \
     \
-    `# ── Conditional mounts (git, ssh) ──` \
+    `# ── Conditional mounts (git, ssh, chamber) ──` \
     "${MOUNTS[@]}" \
     \
     `# ── Environment variables (SSH agent, etc.) ──` \
     "${ENV_VARS[@]}" \
+    \
+    `# ── Chamber mode env vars ──` \
+    "${CHAMBER_ENVS[@]}" \
     \
     `# ── API keys from environment ──` \
     ${OPENAI_API_KEY:+-e "OPENAI_API_KEY=${OPENAI_API_KEY}"} \
@@ -172,6 +245,9 @@ exec "${CONTAINER_ENGINE}" run --rm -it \
     \
     `# ── Networking ──` \
     ${NETWORK_ARGS} \
+    \
+    `# ── Entrypoint override for chamber mode ──` \
+    ${ENTRYPOINT_OVERRIDE} \
     \
     `# ── Security hardening ──` \
     --read-only \

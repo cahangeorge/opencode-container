@@ -5,6 +5,8 @@
 
 # Build artifacts
 opencode-bin
+Containerfile.opencode
+.empty-file
 
 # OS files
 .DS_Store

@@ -1,9 +1,10 @@
-# OpenCode Container — Portable Setup
+# OpenCode + OpenChamber Container — Portable Setup
 # Works on any Linux system with Podman or Docker
 # macOS supported via Docker Desktop / Podman Desktop
 #
 # Build:  podman build -t opencode .
-# Run:    ./run-opencode.sh [project-dir]
+# Run CLI:    ./run-opencode.sh [project-dir]
+# Run Chamber: ./run-opencode.sh --chamber [project-dir]
 
 # Pinned digest for node:24-bookworm-slim (immutable)
 # To update: podman pull docker.io/library/node:24-bookworm-slim && podman inspect --format='{{.Digest}}' docker.io/library/node:24-bookworm-slim
@@ -20,6 +21,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     g++ \
     make \
     gnupg \
+    supervisor \
     && rm -rf /var/lib/apt/lists/*
 
 # Install bun with version pinning
@@ -32,7 +34,7 @@ ENV PATH="/root/.bun/bin:${PATH}"
 # Option 1: Copy from host if provided during build (fastest)
 # Option 2: The container will need opencode installed at runtime
 ARG OPENCODE_BIN=""
-COPY ${OPENCODE_BIN:-/dev/null} /usr/local/bin/opencode-temp
+COPY ${OPENCODE_BIN:-.empty-file} /usr/local/bin/opencode-temp
 RUN if [ -f /usr/local/bin/opencode-temp ] && [ -s /usr/local/bin/opencode-temp ]; then \
         mv /usr/local/bin/opencode-temp /usr/local/bin/opencode; \
         chmod +x /usr/local/bin/opencode; \
@@ -48,6 +50,10 @@ RUN bun install -g \
     @brave/brave-search-mcp-server \
     octocode-mcp \
     @agentmemory/mcp
+
+# ── Install OpenChamber ──────────────────────────────────────────
+ARG OPENCHAMBER_VERSION=1.12.1
+RUN npm install -g "@openchamber/web@${OPENCHAMBER_VERSION}"
 
 # Create non-root user matching host UID (handle collisions with base image)
 ARG HOST_UID=1000
@@ -66,8 +72,19 @@ RUN if getent group ${HOST_GID} >/dev/null 2>&1; then \
         useradd -m -u ${HOST_UID} -g ${HOST_GID} -s /bin/bash opencode; \
     fi
 
+# Supervisor config for running both OpenCode serve and OpenChamber
+COPY supervisord.conf /etc/supervisor/conf.d/supervisord.conf
+COPY start-chamber.sh /usr/local/bin/start-chamber.sh
+RUN chmod +x /usr/local/bin/start-chamber.sh
+
+# Ensure supervisor log directory exists
+RUN mkdir -p /var/log/supervisor && chown opencode:opencode /var/log/supervisor
+
 USER opencode
 WORKDIR /workspace
+
+# Expose ports for OpenChamber (3000) and OpenCode serve (4096)
+EXPOSE 3000 4096
 
 # Healthcheck for orchestrators
 HEALTHCHECK --interval=30s --timeout=5s --start-period=5s \
