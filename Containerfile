@@ -77,6 +77,35 @@ COPY supervisord.conf /etc/supervisor/conf.d/supervisord.conf
 COPY start-chamber.sh /usr/local/bin/start-chamber.sh
 RUN chmod +x /usr/local/bin/start-chamber.sh
 
+# ── Optional: Bake in host data at build time ────────────────────
+# Use --export-history flag in run-opencode.sh to populate these
+ARG EXPORT_CONFIG=""
+ARG EXPORT_DATA=""
+ARG EXPORT_STATE=""
+ARG EXPORT_CHAMBER=""
+COPY ${EXPORT_CONFIG:-.empty-file} /tmp/opencode-config-temp
+COPY ${EXPORT_DATA:-.empty-file} /tmp/opencode-data-temp
+COPY ${EXPORT_STATE:-.empty-file} /tmp/opencode-state-temp
+COPY ${EXPORT_CHAMBER:-.empty-file} /tmp/openchamber-config-temp
+RUN if [ -d /tmp/opencode-config-temp ] && [ "$(ls -A /tmp/opencode-config-temp)" ]; then \
+        mkdir -p /home/opencode/.config/opencode && \
+        cp -a /tmp/opencode-config-temp/* /home/opencode/.config/opencode/; \
+    fi && \
+    if [ -d /tmp/opencode-data-temp ] && [ "$(ls -A /tmp/opencode-data-temp)" ]; then \
+        mkdir -p /home/opencode/.local/share/opencode && \
+        cp -a /tmp/opencode-data-temp/* /home/opencode/.local/share/opencode/; \
+    fi && \
+    if [ -d /tmp/opencode-state-temp ] && [ "$(ls -A /tmp/opencode-state-temp)" ]; then \
+        mkdir -p /home/opencode/.local/state/opencode && \
+        cp -a /tmp/opencode-state-temp/* /home/opencode/.local/state/opencode/; \
+    fi && \
+    if [ -d /tmp/openchamber-config-temp ] && [ "$(ls -A /tmp/openchamber-config-temp)" ]; then \
+        mkdir -p /home/opencode/.config/openchamber && \
+        cp -a /tmp/openchamber-config-temp/* /home/opencode/.config/openchamber/; \
+    fi && \
+    chown -R opencode:opencode /home/opencode/.config /home/opencode/.local && \
+    rm -rf /tmp/*-temp
+
 # Ensure supervisor log directory exists
 RUN mkdir -p /var/log/supervisor && chown opencode:opencode /var/log/supervisor
 

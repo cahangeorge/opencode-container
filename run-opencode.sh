@@ -3,13 +3,15 @@
 # Supports Podman (preferred) and Docker
 #
 # Usage:
-#   ./run-opencode.sh [project-dir] [extra-args...]     # OpenCode CLI
-#   ./run-opencode.sh --chamber [project-dir]             # OpenCode + OpenChamber Web UI
+#   ./run-opencode.sh [project-dir] [extra-args...]              # OpenCode CLI
+#   ./run-opencode.sh --chamber [project-dir]                    # OpenCode + OpenChamber Web UI
+#   ./run-opencode.sh --export-history [--chamber] [project-dir] # Build portable image with history
 #
 # Examples:
 #   ./run-opencode.sh                          # CLI in current dir
 #   ./run-opencode.sh ~/Projects/myapp         # CLI in specific project
 #   ./run-opencode.sh --chamber ~/Projects/myapp  # Web UI for project
+#   ./run-opencode.sh --export-history --chamber   # Build portable image with all history
 
 set -euo pipefail
 
@@ -26,12 +28,25 @@ else
     exit 1
 fi
 
-# ─── Parse mode flag ───────────────────────────────────────────
+# ─── Parse flags ───────────────────────────────────────────────
 CHAMBER_MODE=false
-if [[ "${1:-}" == "--chamber" ]]; then
-    CHAMBER_MODE=true
-    shift
-fi
+EXPORT_HISTORY=false
+
+while [[ "${1:-}" == --* ]]; do
+    case "${1}" in
+        --chamber)
+            CHAMBER_MODE=true
+            shift
+            ;;
+        --export-history)
+            EXPORT_HISTORY=true
+            shift
+            ;;
+        *)
+            break
+            ;;
+    esac
+done
 
 # ─── Configuration ───────────────────────────────────────────────
 CONTAINER_NAME="opencode"
@@ -85,13 +100,17 @@ if [[ -f "${ENV_FILE}" ]]; then
 fi
 
 # ─── Build image if needed ──────────────────────────────────────
-if ! "${CONTAINER_ENGINE}" image exists "${IMAGE_NAME}" 2>/dev/null; then
+if ! "${CONTAINER_ENGINE}" image exists "${IMAGE_NAME}" 2>/dev/null || [[ "${EXPORT_HISTORY}" == true ]]; then
     echo "Building OpenCode container image..."
 
-    # Cleanup trap for temporary binary
+    # Cleanup trap for temporary files
     TEMP_BIN=""
+    TEMP_EXPORT_DIRS=()
     cleanup() {
         [[ -n "${TEMP_BIN}" ]] && rm -f "${TEMP_BIN}"
+        for dir in "${TEMP_EXPORT_DIRS[@]}"; do
+            [[ -n "${dir}" ]] && rm -rf "${dir}"
+        done
     }
     trap cleanup EXIT
 
@@ -109,11 +128,66 @@ if ! "${CONTAINER_ENGINE}" image exists "${IMAGE_NAME}" 2>/dev/null; then
         echo "  (install via pacman on Arch/CachyOS, or mount the binary)"
     fi
 
+    # Export history: copy host data into build context
+    if [[ "${EXPORT_HISTORY}" == true ]]; then
+        echo "  Exporting conversation history and settings into image..."
+
+        if [[ -d "${HOST_CONFIG_DIR}" && "$(ls -A "${HOST_CONFIG_DIR}")" ]]; then
+            EXPORT_CONFIG_DIR="${SCRIPT_DIR}/opencode-config-export"
+            mkdir -p "${EXPORT_CONFIG_DIR}"
+            # Exclude node_modules and large dependency dirs
+            rsync -a --exclude='node_modules' --exclude='.git' --exclude='*.log' \
+                "${HOST_CONFIG_DIR}/" "${EXPORT_CONFIG_DIR}/" 2>/dev/null || \
+                cp -a "${HOST_CONFIG_DIR}"/* "${EXPORT_CONFIG_DIR}/" 2>/dev/null || true
+            TEMP_EXPORT_DIRS+=("${EXPORT_CONFIG_DIR}")
+            BUILD_ARGS+=(--build-arg "EXPORT_CONFIG=./opencode-config-export")
+            echo "    Config: ${HOST_CONFIG_DIR}"
+        fi
+
+        if [[ -d "${HOST_DATA_DIR}" && "$(ls -A "${HOST_DATA_DIR}")" ]]; then
+            EXPORT_DATA_DIR="${SCRIPT_DIR}/opencode-data-export"
+            mkdir -p "${EXPORT_DATA_DIR}"
+            cp -a "${HOST_DATA_DIR}"/* "${EXPORT_DATA_DIR}/" 2>/dev/null || true
+            TEMP_EXPORT_DIRS+=("${EXPORT_DATA_DIR}")
+            BUILD_ARGS+=(--build-arg "EXPORT_DATA=./opencode-data-export")
+            echo "    Data:   ${HOST_DATA_DIR}"
+        fi
+
+        if [[ -d "${HOST_STATE_DIR}" && "$(ls -A "${HOST_STATE_DIR}")" ]]; then
+            EXPORT_STATE_DIR="${SCRIPT_DIR}/opencode-state-export"
+            mkdir -p "${EXPORT_STATE_DIR}"
+            cp -a "${HOST_STATE_DIR}"/* "${EXPORT_STATE_DIR}/" 2>/dev/null || true
+            TEMP_EXPORT_DIRS+=("${EXPORT_STATE_DIR}")
+            BUILD_ARGS+=(--build-arg "EXPORT_STATE=./opencode-state-export")
+            echo "    State:  ${HOST_STATE_DIR}"
+        fi
+
+        if [[ -d "${HOST_CHAMBER_CONFIG_DIR}" && "$(ls -A "${HOST_CHAMBER_CONFIG_DIR}")" ]]; then
+            EXPORT_CHAMBER_DIR="${SCRIPT_DIR}/openchamber-config-export"
+            mkdir -p "${EXPORT_CHAMBER_DIR}"
+            cp -a "${HOST_CHAMBER_CONFIG_DIR}"/* "${EXPORT_CHAMBER_DIR}/" 2>/dev/null || true
+            TEMP_EXPORT_DIRS+=("${EXPORT_CHAMBER_DIR}")
+            BUILD_ARGS+=(--build-arg "EXPORT_CHAMBER=./openchamber-config-export")
+            echo "    Chamber: ${HOST_CHAMBER_CONFIG_DIR}"
+        fi
+    fi
+
     # Match host UID/GID
     BUILD_ARGS+=(--build-arg "HOST_UID=$(id -u)")
     BUILD_ARGS+=(--build-arg "HOST_GID=$(id -g)")
 
     "${CONTAINER_ENGINE}" build "${BUILD_ARGS[@]}" -t "${IMAGE_NAME}" "${SCRIPT_DIR}"
+
+    if [[ "${EXPORT_HISTORY}" == true ]]; then
+        echo ""
+        echo "Portable image built with history baked in."
+        echo "To move to another host:"
+        echo "  ${CONTAINER_ENGINE} save ${IMAGE_NAME} | gzip > opencode-portable.tar.gz"
+        echo "Then on the new host:"
+        echo "  gunzip -c opencode-portable.tar.gz | ${CONTAINER_ENGINE} load"
+        echo ""
+        exit 0
+    fi
 fi
 
 # ─── Prepare conditional mounts and env vars ────────────────────

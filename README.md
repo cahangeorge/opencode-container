@@ -101,6 +101,32 @@ The script auto-builds the image on first run. It will:
 - **User:** Non-root, matching host UID/GID
 - **Security:** `--read-only`, `--cap-drop ALL`, `--security-opt no-new-privileges`
 
+## Portable Image with History
+
+To move your complete setup (including all conversation history and settings) to another machine:
+
+```bash
+# Build a portable image with history baked in
+./run-opencode.sh --export-history --chamber
+
+# Save the image
+podman save localhost/opencode | gzip > opencode-portable.tar.gz
+
+# Move to new host, then load
+ gunzip -c opencode-portable.tar.gz | podman load
+
+# Run on new host — history is already inside
+./run-opencode.sh --chamber
+```
+
+The `--export-history` flag copies these directories into the image:
+- `~/.config/opencode` — settings, agents, skills, MCPs
+- `~/.local/share/opencode` — conversation history
+- `~/.local/state/opencode` — runtime state
+- `~/.config/openchamber` — OpenChamber settings
+
+**Note:** API keys in `.env` are NOT exported into the image. Set them on the new host via `~/.config/opencode/.env`.
+
 ## Updating
 
 ```bash
